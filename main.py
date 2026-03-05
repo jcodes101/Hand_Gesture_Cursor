@@ -1,16 +1,17 @@
 import cv2
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 
-'''
--   initialize a camera and check if it is
-able to be opened
+# l oads the trained ML model file (TensorFlow Lite) and contains network to detect hands
+# pass in and configure model to detect up to 2 hands
+hand_model = python.BaseOptions(model_asset_path='hand_landmarker.task')
+options = vision.HandLandmarkerOptions(
+    base_options=hand_model,
+    num_hands=2
+)
+detector = vision.HandLandmarker.create_from_options(options)
 
--   a constant infinite loop runs to keep the
-camera running, and checks if running was a sucess
-
--   the frame is flipped to mirror properly for viewing
-and the 'q' button is used to (break) the loop, and lastly
-all cv2 windows are destroyed and the camera is released
-'''
 camera = cv2.VideoCapture(0)
 if not camera.isOpened():
     print("can't open camera")
@@ -22,8 +23,34 @@ while True:
         print("can't recieve frame")
         break
     camera_frame = cv2.flip(frame, 1)
+
+    # convert color format | cv: BGR - mp: RGB
+    # prepare image for the mp model and run the model on that specific image and pass it in to result
+    rgb_frame = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image (
+        image_format = mp.ImageFormat.SRGB,
+        data = rgb_frame
+    )
+    result = detector.detect(mp_image)
+
+    if result.hand_landmarks:
+        # get image dimensions
+        h, w, _ = camera_frame.shape
+
+        for hand_landmarks in result.hand_landmarks:
+            for landmark in hand_landmarks:
+                # convert coordinates to pixel coordinates
+                px = int(landmark.x * w)
+                py = int(landmark.y * h)
+
+                # draws dot at each landmaerk
+                # image, (x,y), radius, color, thickness
+                cv2.circle(camera_frame, (px, py), 5, (0, 255, 0), -1)
+                print(landmark.x, landmark.y)
+
     cv2.imshow("live video", camera_frame)
     if(cv2.waitKey(1)==ord('q')):
         break
 camera.release()
 cv2.destroyAllWindows()
+
