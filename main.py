@@ -6,8 +6,7 @@ import pyautogui
 import time
 import math
 
-# loads the trained ML model file (TensorFlow Lite) and contains network to detect hands
-# pass in and configure model to detect up to 2 hands
+
 hand_model = python.BaseOptions(model_asset_path='hand_landmarker.task')
 options = vision.HandLandmarkerOptions(
     base_options=hand_model,
@@ -15,28 +14,32 @@ options = vision.HandLandmarkerOptions(
 )
 detector = vision.HandLandmarker.create_from_options(options)
 
-# mapping hand coordinates for screen control
-    # ex. Example: If your camera sees your hand at the far right, 
-    # you want your mouse to go to the far right of the screen.
+# camera to screen — for mapping hand coordinates for screen control
 screen_w, screen_h = pyautogui.size()
 print(f"\n hand mouse control .")
 
 # store previos cursor position to allow smooth movement
-prev_screen_x, prev_screen_y = 0, 0
+prev_screen_x, prev_screen_y = pyautogui.position()
 
 # gesture time control
 click_start_time = None
 click_times = []
 click_cooldown = 0.5
 scroll_mode = False
-freeze_cursor = False
+frozen_cursor = False
 scroll_time = 0
+pyautogui.PAUSE = 0
+pyautogui.FAILSAFE = False
 
 # message display time
 status_text = ""
 status_time = 0
 
 camera = cv2.VideoCapture(0)
+camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
 if not camera.isOpened():
     print("can't open camera")
     exit()
@@ -63,14 +66,38 @@ while True:
         h, w, _ = camera_frame.shape
 
         for hand_landmarks in result.hand_landmarks:
-            for landmark in hand_landmarks:
+            # only draw important hand landmarks (finger tips) to minimize the amount of circles drawn every frame
+            important_landmarks = [4, 8, 12, 16, 20]
+            
+            # skeleton connections (mediapipe hand structure)
+            connections = [
+                (0,1),(1,2),(2,3),(3,4),                        # thumb
+                (0,5),(5,6),(6,7),(7,8),                        # index
+                (5,9),(9,10),(10,11),(11,12),                   # middle
+                (9,13),(13,14),(14,15),(15,16),                 # ring
+                (13,17),(17,18),(18,19),(19,20),                # pinky
+                (0,17)                                          # palm base
+            ]
+
+            for start, end in connections:
+                x1 = int(hand_landmarks[start].x * w)
+                y1 = int(hand_landmarks[start].y * h)
+                x2 = int(hand_landmarks[end].x * w)
+                y2 = int(hand_landmarks[end].y * h)
+
+                # skeleton line
+                cv2.line(camera_frame, (x1,y1), (x2,y2), (255, 255, 255), 1)
+            
+            for l in important_landmarks:
+                landmark = hand_landmarks[l]
                 # convert coordinates to pixel coordinates
                 px = int(landmark.x * w)
                 py = int(landmark.y * h)
 
                 # draws dot at each landmaerk
                 # image, (x,y), radius, color, thickness
-                cv2.circle(camera_frame, (px, py), 5, (0, 255, 0), -1)
+                # cv2.circle(camera_frame, (px, py), 8, (120, 0, 120), -1)
+                cv2.circle(camera_frame, (px, py), 6, (245, 162, 130), -1)
                 # print(landmark.x, landmark.y)
 
             # =========set finger tip landmarks=================
@@ -95,8 +122,8 @@ while True:
             distance = math.hypot(thumb_tip.x - index_tip.x, thumb_tip.y - index_tip.y)
 
             if distance < 0.06:
-                if not freeze_cursor:
-                    freeze_cursor = True
+                if not frozen_cursor:
+                    frozen_cursor = True
                     click_times.append(now)
 
                     if len(click_times) > 2:
@@ -113,26 +140,39 @@ while True:
                         status_text = "single click"
                         status_time = now
             else:
-                freeze_cursor = False  
+                frozen_cursor = False  
 
             # move cursor with index_finger
-            smooth = 0.2
-            if not freeze_cursor:
-                # calculate screen pixel location
+            deadzone = 5
+
+            if not frozen_cursor:
+                # modified mapping | calculate screen pixel location
                 #   ex. screen_x = 0.5 * 1920 = 960
-                screen_x = int(index_tip.x * screen_w)
-                screen_y = int(index_tip.y * screen_h)
+                target_x = int((index_tip.x - 0.1) * screen_w * 1.25)
+                target_y = int((index_tip.y - 0.1) * screen_h * 1.25)
 
-                # linear interpolation (LERP)
-                #   this is the process of a CURRENT target *gradually* reaching its
-                #   next destination | ex. 500 + (500 * 0.2) -> 500 + 100 = 600
-                #                                                         -> 600 - 680
-                #                                                         -> 680 -> 744
-                screen_x = int(prev_screen_x + (screen_x - prev_screen_x) * smooth)
-                screen_y = int(prev_screen_y + (screen_y - prev_screen_y) * smooth)
+                dynamic_x = abs(target_x - prev_screen_x)
+                dynamic_y = abs(target_y - prev_screen_y)
+                speed = dynamic_x + dynamic_y
 
-                pyautogui.moveTo(screen_x, screen_y)
-                prev_screen_x, prev_screen_y = screen_x, screen_y
+                alpha = min(0.35, max(0.08, speed / 1000))
+
+                # exponential smoothing (ES)
+                #   previous value contributes exponentially less over time
+                screen_x = int(alpha * target_x + (1 - alpha) * prev_screen_x)
+                screen_y = int(alpha * target_y + (1 - alpha) * prev_screen_y)
+
+                # velocity prediction, removing micro lag
+                velocity_x = screen_x - prev_screen_x
+                velocity_y = screen_y - prev_screen_y
+
+                screen_x += velocity_x * 0.3
+                screen_y += velocity_y * 0.3
+
+                # deadzone filter
+                if abs(screen_x - prev_screen_x) > deadzone or abs(screen_y - prev_screen_y) > deadzone:
+                    pyautogui.moveTo(screen_x, screen_y)
+                    prev_screen_x, prev_screen_y = screen_x, screen_y
 
             # scrolling mode
             if sum(gesture_determination) == 4:
